@@ -1,6 +1,7 @@
 #include "common.cpp"
 #include <cuda_runtime_api.h>
 #include <cublas_v2.h>
+#include <float.h>
 #include "device_launch_parameters.h"
 //#include "kernels.cu"
 
@@ -178,10 +179,12 @@ void init(float *a, int *y, float *f, int ntv)
 }
 void reduction(int *y, float *a, float *f, float C, int nTV, float *blow, float *bup, int *iup, int *ilow)
 {
+	*bup = FLT_MAX;
+	*blow = -1.*FLT_MAX;
 	for (int i = 0; i < nTV; i++)
 	{
 		if (( (y[i]==1 && a[i]>0 && a[i]<C) || (y[i]==-1 && a[i]>0 && a[i]<C)) ||
-			(y[i]==1 &&a[i]==0)||(y[i]==-1 && a[i]==C))
+			(y[i]==1 && a[i]==0)||(y[i]==-1 && a[i]==C))
 		{
 			if (*bup > f[i])
 			{
@@ -190,7 +193,7 @@ void reduction(int *y, float *a, float *f, float C, int nTV, float *blow, float 
 			}
 		}//bup
 		if (( (y[i]==1 && a[i]>0 && a[i]<C) ||	(y[i]==-1 && a[i]>0 && a[i]<C)) ||
-			(y[i]==1 &&a[i]==C)||(y[i]==-1 && a[i]==0))
+			(y[i]==1 && a[i]==C)||(y[i]==-1 && a[i]==0))
 		{
 			if (*blow < f[i])
 			{
@@ -200,25 +203,32 @@ void reduction(int *y, float *a, float *f, float C, int nTV, float *blow, float 
 		}//blow
 	}
 }
-float getK(float *tv, int ncol, float gamma, int i, int j)
+
+float scal(float *x, float *y, int n)
 {
 	float val = 0;
-	for (int k = 0; k < ncol; k++)
+	for (int i = 0; i < n; i++)
 	{
-		val += (tv[i*ncol+k]-tv[j*ncol+k])*(tv[i*ncol+k]-tv[j*ncol+k]);
+		val += x[i]*y[i];
 	}
-	return exp(-gamma*val);
+	return val;
 }
-
+float getK(float *tv, int ncol, int *y, float gamma, int i, int j)
+{
+	float val = scal(&tv[i*ncol], &tv[i*ncol], ncol)+
+				scal(&tv[j*ncol], &tv[j*ncol], ncol)-
+				2*scal(&tv[i*ncol], &tv[j*ncol], ncol);
+	return y[i]*y[j]*exp(-gamma*val);
+}
 void smo(svm_sample *train, svm_model *model)
 {
 	int nTV = train->nTV;
 	int nfeatures = model->nfeatures;
 	float tau = 0.001;
 	float C = 1;
-	float gamma = 0.1;
-	float bup = 0;//alpha_up
-	float blow = 0;//alpha_low
+	float gamma = 1./nfeatures;
+	float bup;//alpha_up
+	float blow;//alpha_low
 	float deltaup, deltalow;
 	int iup, ilow;
 	float k1, k2, k12;
@@ -232,20 +242,47 @@ void smo(svm_sample *train, svm_model *model)
 	while (blow>bup + 2*tau)
 	{
 		iter++;
-		k12 = getK(tv, nfeatures, gamma, iup, ilow);
-		a[iup] = max(0, min(bup + y[iup]*(f[ilow]-f[iup])/(2*k12-2),C));
+		k12 = getK(tv, nfeatures, y, gamma, iup, ilow);
+		a[iup] = max(0, min(bup - y[iup]*(f[ilow]-f[iup])/(2*k12-2),C));
 		a[ilow] = max(0, min(blow + y[iup]*y[ilow]*(bup-a[iup]), C));
-		deltaup = a[iup] - bup;
-		deltalow = a[ilow] - blow;
+		deltaup = a[iup]-bup;
+		deltalow = a[ilow]-blow;
 		for (int i = 0; i < nTV; i++)
 		{
-			f[i] += deltalow*y[ilow]*getK(tv, nfeatures, gamma, i, ilow)
-					+deltaup*y[iup]*getK(tv, nfeatures, gamma, iup, i);
+			f[i] += deltalow*y[ilow]*getK(tv, nfeatures, y, gamma, i, ilow)
+				    +deltaup*y[iup]*getK(tv, nfeatures, y, gamma, iup, i);
 		}
 		reduction(y, a, f, C, nTV, &blow, &bup, &iup, &ilow);
 	}
-	float b = (blow+bup)/2; 
-
+	model->b = (float*)malloc(sizeof(float));
+	model->b[0] = (blow+bup)/2; 
+	model->C = C;
+	int nsv = 0;
+	for (int i = 0; i < nTV; i++)
+	{
+		if (a[i])
+		{
+			nsv++;
+		}
+	}
+	model->nSV = nsv;
+	model->SV_dens = (float*)malloc(nsv*nfeatures*sizeof(float));
+	model->l_SV = (float*)malloc(nsv*sizeof(float));
+	model->coef_gamma = gamma;
+	model->kernel_type = 0;
+	model->svm_type = 0;
+	for (int i = 0, k = 0; i < nTV; i++)
+	{
+		if (a[i] != 0)
+		{
+			for (int j = 0; j < nfeatures; j++)
+			{
+				model->SV_dens[k*nfeatures+j] = tv[i*nfeatures+j];
+			}
+			model->l_SV[k] = a[i]*y[i];
+			k++;
+		}
+	}
 }
 
 int main(int argc, char **argv)
@@ -254,9 +291,12 @@ int main(int argc, char **argv)
 	if (argc==1)
 	{
 		argc = 4;
-		argv[1] = "C:\\Data\\b.txt";
-		argv[2] = "C:\\Data\\b.model";
-		argv[3] = "10";
+		//argv[1] = "C:\\Data\\b.txt";
+		//argv[2] = "C:\\Data\\b.model";
+		//argv[3] = "10";
+		argv[1] = "C:\\Data\\a9a";
+		argv[2] = "C:\\Data\\a9a.model";
+		argv[3] = "123";
 	}
 	if(argc<4)
 		exit_with_help();
@@ -281,7 +321,7 @@ int main(int argc, char **argv)
 	
 	smo(train, model);
 	//train_model(train, model);
-
+	save_model(output, model);
 	//output model
 	return 0;
 }

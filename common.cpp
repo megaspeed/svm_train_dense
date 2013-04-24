@@ -57,7 +57,8 @@ float cuGetTimer() { // result in miliSec
 
 #endif
 
-
+const char *svm_type_table[] = { "c_svc","nu_svc","one_class","epsilon_svr","nu_svr",0 };
+const char *kernel_type_table[] = { "rbf","linear","polynomial","sigmoid","precomputed",0 };
 void set_labels(svm_sample *train, svm_model *model)
 {
 	for (int i = 0; i < train->nTV; i++)
@@ -264,6 +265,7 @@ int parse_TV(FILE* inputFilePointer, svm_sample *train, svm_model *model)
 	train->l_TV = h_ldata;
 	train->nTV = nsamples;
 	model->label_set = set_labels;
+	model->nr_class = label_number;
 
 	free(stringBuffer);
 	free(line);
@@ -379,4 +381,58 @@ void exit_with_help()
 {
 	printf("Usage: svm-predict test_file model_file #_of_features\n");
 	exit(1);
+}
+int save_model(FILE *fp, const svm_model *model)
+{
+
+	fprintf(fp,"svm_type %s\n", svm_type_table[model->svm_type]);
+	fprintf(fp,"kernel_type %s\n", kernel_type_table[model->kernel_type]);
+
+	if(model->kernel_type == 2)
+		fprintf(fp,"degree %d\n", model->coef_d);
+
+	if(model->kernel_type == 2 || model->kernel_type == 0 || model->kernel_type == 3)
+		fprintf(fp,"gamma %g\n", model->coef_gamma);
+
+	if(model->kernel_type == 2 || model->kernel_type == 3)
+		fprintf(fp,"coef0 %g\n", model->coef_b);
+
+	int nr_class = model->nr_class;
+	int l = model->nSV;
+	fprintf(fp, "nr_class %d\n", nr_class);
+	fprintf(fp, "total_sv %d\n",l);
+	
+	{
+		fprintf(fp, "rho");
+		for(int i=0;i<nr_class*(nr_class-1)/2;i++)
+			fprintf(fp," %f",model->b[i]);
+		fprintf(fp, "\n");
+	}
+	
+	if(model->label_set)
+	{
+		fprintf(fp, "label");
+		for(int i=0;i<nr_class;i++)
+			fprintf(fp," %d",model->label_set[i]);
+		fprintf(fp, "\n");
+	}
+
+
+	fprintf(fp, "SV\n");
+	float *sv_coef = model->l_SV;
+	float *SV = model->SV_dens;
+
+	for(int i=0;i<l;i++)
+	{
+		for(int j=0;j<nr_class-1;j++)
+			fprintf(fp, "%.16g ",sv_coef[j*nr_class+i]);
+
+		for (int j = 0; j < model->nfeatures; j++)
+			fprintf(fp,"%d:%.8g ", j+1, SV[i*model->nfeatures+j]);
+
+		fprintf(fp, "\n");
+	}
+
+	if (ferror(fp) != 0 || fclose(fp) != 0) return -1;
+	else return 0;
 }
