@@ -177,6 +177,22 @@ void init(float *a, int *y, float *f, int ntv)
 		f[i] = -1.*y[i]; 
 	}
 }
+float scal(float *x, float *y, int n)
+{
+	float val = 0;
+	for (int i = 0; i < n; i++)
+	{
+		val += x[i]*y[i];
+	}
+	return val;
+}
+float getK(float *tv, int ncol, int *y, float gamma, int i, int j)
+{
+	float val = scal(&tv[i*ncol], &tv[i*ncol], ncol)+
+				scal(&tv[j*ncol], &tv[j*ncol], ncol)-
+				2*scal(&tv[i*ncol], &tv[j*ncol], ncol);
+	return exp(-gamma*val);
+}
 void reduction(int *y, float *a, float *f, float C, int nTV, float *blow, float *bup, int *iup, int *ilow)
 {
 	*bup = FLT_MAX;
@@ -203,22 +219,75 @@ void reduction(int *y, float *a, float *f, float C, int nTV, float *blow, float 
 		}//blow
 	}
 }
+void calc_alphas(float *tv, int *y, float *a, float *f, float *anewup, float *anewlow, int iup, int ilow, int ntv, int nfeatures, float C, float betta, bool *done)
+{
+	float eps = 0.000001;
+	float upold = a[iup];
+	float lowold = a[ilow];
+	float gamma;
+	int s = y[ilow]*y[iup];
+	float L;
+	float H;
+	if (y[ilow] == y[iup])
+		gamma = lowold + upold;
+	else
+		gamma = lowold - upold;
 
-float scal(float *x, float *y, int n)
-{
-	float val = 0;
-	for (int i = 0; i < n; i++)
+	if (s == 1)
 	{
-		val += x[i]*y[i];
+		L = max(0, gamma - C);
+		H = min(C, gamma);
 	}
-	return val;
-}
-float getK(float *tv, int ncol, int *y, float gamma, int i, int j)
-{
-	float val = scal(&tv[i*ncol], &tv[i*ncol], ncol)+
-				scal(&tv[j*ncol], &tv[j*ncol], ncol)-
-				2*scal(&tv[i*ncol], &tv[j*ncol], ncol);
-	return y[i]*y[j]*exp(-gamma*val);
+	else
+	{
+		L = max(0, -gamma);
+		H = min(C, C - gamma);
+	}
+	if (H <= L)
+		*done = true;
+	float nu = 2*getK(tv, nfeatures, y, betta, ilow, iup) - 2;
+	float upnew;
+	float lownew;
+	if (nu < 0)
+	{
+		upnew = upold - (y[iup]*(f[ilow]-f[iup])/nu);
+		if (upnew < L)
+			upnew = L;
+		else if (upnew > H)
+				upnew = H;
+	}
+	else
+	{
+		float slope= y[iup]*(f[ilow]-f[iup]);
+		float change= slope * (H-L);
+		if(fabs(change)>0.0f)
+		{
+			if(slope>0.0f)
+				upnew= H;
+			else
+				upnew= L;
+		}
+		else
+			upnew= upold;
+
+		if( upnew > C - eps * C)
+			upnew=C;
+		else if (upnew < eps * C)
+				upnew=0.0f;
+	}
+	if( fabs( upnew - upold) < eps * ( upnew + upold + eps))
+		*done = true;
+	if (s == 1)
+		lownew = gamma - upnew;
+	else
+		lownew = gamma + upnew;
+
+	if( lownew > C - eps * C)
+		lownew=C;
+	else if (lownew < eps * C)
+			lownew=0.0f;
+	*anewup = upnew;
+	*anewlow = lownew;
 }
 void smo(svm_sample *train, svm_model *model)
 {
@@ -226,12 +295,13 @@ void smo(svm_sample *train, svm_model *model)
 	int nfeatures = model->nfeatures;
 	float tau = 0.001;
 	float C = 1;
-	float gamma = 1./nfeatures;
+	float betta = 1./nfeatures;
 	float bup;//alpha_up
 	float blow;//alpha_low
+	float anewlow, anewup;
 	float deltaup, deltalow;
 	int iup, ilow;
-	float k1, k2, k12;
+	float k12;
 	float *f = (float*)malloc(nTV*sizeof(float));// object function
 	float *a = (float*)malloc(nTV*sizeof(float));// Lagrange multipliers
 	int *y = train->l_TV;//lables
@@ -239,19 +309,25 @@ void smo(svm_sample *train, svm_model *model)
 	init(a, y, f, nTV);
 	reduction(y, a, f, C, nTV, &blow, &bup, &iup, &ilow);
 	int iter = 0;
+	bool done = false;
 	while (blow>bup + 2*tau)
 	{
 		iter++;
-		k12 = getK(tv, nfeatures, y, gamma, iup, ilow);
-		a[iup] = max(0, min(bup - y[iup]*(f[ilow]-f[iup])/(2*k12-2),C));
-		a[ilow] = max(0, min(blow + y[iup]*y[ilow]*(bup-a[iup]), C));
-		deltaup = a[iup]-bup;
-		deltalow = a[ilow]-blow;
+		//k12 = getK(tv, nfeatures, y, betta, iup, ilow);
+		//anewup = max(0, min(a[iup] - y[iup]*(f[ilow]-f[iup])/(2*k12-2),C));
+		//anewlow = max(0, min(a[ilow] - y[iup]*y[ilow]*(anewup-a[iup]), C));
+		calc_alphas(tv, y, a, f, &anewup, &anewlow, iup, ilow, nTV, nfeatures, C, betta, &done);
+		deltaup = anewup-a[iup];
+		deltalow = anewlow-a[ilow];
 		for (int i = 0; i < nTV; i++)
 		{
-			f[i] += deltalow*y[ilow]*getK(tv, nfeatures, y, gamma, i, ilow)
-				    +deltaup*y[iup]*getK(tv, nfeatures, y, gamma, iup, i);
+			f[i] += deltalow*y[ilow]*getK(tv, nfeatures, y, betta, i, ilow)
+				    +deltaup*y[iup]*getK(tv, nfeatures, y, betta, iup, i);
 		}
+		a[iup] = anewup;
+		a[ilow] = anewlow;
+		if (done)
+			break;
 		reduction(y, a, f, C, nTV, &blow, &bup, &iup, &ilow);
 	}
 	model->b = (float*)malloc(sizeof(float));
@@ -261,14 +337,12 @@ void smo(svm_sample *train, svm_model *model)
 	for (int i = 0; i < nTV; i++)
 	{
 		if (a[i])
-		{
 			nsv++;
-		}
 	}
 	model->nSV = nsv;
 	model->SV_dens = (float*)malloc(nsv*nfeatures*sizeof(float));
 	model->l_SV = (float*)malloc(nsv*sizeof(float));
-	model->coef_gamma = gamma;
+	model->coef_gamma = betta;
 	model->kernel_type = 0;
 	model->svm_type = 0;
 	for (int i = 0, k = 0; i < nTV; i++)
@@ -284,7 +358,6 @@ void smo(svm_sample *train, svm_model *model)
 		}
 	}
 }
-
 int main(int argc, char **argv)
 {
 	FILE *input, *output;
