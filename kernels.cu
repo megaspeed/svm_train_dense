@@ -23,7 +23,7 @@ __global__ void initialization( float *d_a, float *d_f, int *d_y, int ntraining)
 }
 
 __global__ void Local_Reduce_Min(int* d_y, float* d_a, float *d_f, float *d_bup_local,
-								 unsigned int* d_Iup_local, float *d_C, int ntraining)
+								 unsigned int* d_Iup_local, float d_C, int ntraining)
 {
 	extern __shared__ float reducearray[];
 	unsigned int tid = threadIdx.x;
@@ -40,11 +40,11 @@ __global__ void Local_Reduce_Min(int* d_y, float* d_a, float *d_f, float *d_bup_
 	{
 		alpha_i = d_a[i];
 		y_i = d_y[i];
-		if ((   (y_i==1  && alpha_i>0 && alpha_i<d_C[0]) ||
-				(y_i==-1 && alpha_i>0 && alpha_i<d_C[0])) ||
-				(y_i==1  && alpha_i==0)|| (y_i==-1 && alpha_i==d_C[0]))
+		if ((   (y_i==1  && alpha_i>0 && alpha_i<d_C) ||
+				(y_i==-1 && alpha_i>0 && alpha_i<d_C)) ||
+				(y_i==1  && alpha_i==0)|| (y_i==-1 && alpha_i==d_C))
 		{
-			if (minreduction[tid] >= d_f[i])
+			if (minreduction[tid] > d_f[i])
 			{
 				minreduction[tid] = d_f[i];
 				minreductionid[tid] = i;
@@ -53,35 +53,35 @@ __global__ void Local_Reduce_Min(int* d_y, float* d_a, float *d_f, float *d_bup_
 		i += gridsize;
 	}
 	__syncthreads();
-	if (blocksize >= 512){if(tid < 256){if(minreduction[tid] >=  minreduction[tid+256])
+	if (blocksize >= 512){if(tid < 256){if(minreduction[tid] >  minreduction[tid+256])
 										{  minreduction[tid] =   minreduction[tid+256];
 										 minreductionid[tid] = minreductionid[tid+256];}}
 						__syncthreads();}
-	if (blocksize >= 256){if(tid < 128){if(minreduction[tid] >=  minreduction[tid+128])
+	if (blocksize >= 256){if(tid < 128){if(minreduction[tid] >  minreduction[tid+128])
 										{  minreduction[tid] =   minreduction[tid+128];
 										 minreductionid[tid] = minreductionid[tid+128];}}
 						__syncthreads();}
-	if (blocksize >= 128){if(tid < 64){if(minreduction[tid] >=  minreduction[tid+64])
+	if (blocksize >= 128){if(tid < 64){if(minreduction[tid] >  minreduction[tid+64])
 										{ minreduction[tid] =   minreduction[tid+64];
 										minreductionid[tid] = minreductionid[tid+64];}}
 						__syncthreads();}
 
-	if (tid < 32){	if(blocksize >= 64){if(minreduction[tid] >=  minreduction[tid+32])
+	if (tid < 32){	if(blocksize >= 64){if(minreduction[tid] >  minreduction[tid+32])
 										{  minreduction[tid] =   minreduction[tid+32];
 										 minreductionid[tid] = minreductionid[tid+32];}}
-					if(blocksize >= 32){if(minreduction[tid] >=  minreduction[tid+16])
+					if(blocksize >= 32){if(minreduction[tid] >  minreduction[tid+16])
 										{  minreduction[tid] =   minreduction[tid+16];
 										 minreductionid[tid] = minreductionid[tid+16];}}
-					if(blocksize >= 16){if(minreduction[tid] >=  minreduction[tid+ 8])
+					if(blocksize >= 16){if(minreduction[tid] >  minreduction[tid+ 8])
 										{  minreduction[tid] =   minreduction[tid+ 8];
 										 minreductionid[tid] = minreductionid[tid+ 8];}}
-					if(blocksize >= 8){if( minreduction[tid] >=  minreduction[tid+ 4])
+					if(blocksize >= 8){if( minreduction[tid] >  minreduction[tid+ 4])
 										{  minreduction[tid] =   minreduction[tid+ 4];
 										 minreductionid[tid] = minreductionid[tid+ 4];}}
-					if(blocksize >= 4){if( minreduction[tid] >=  minreduction[tid+ 2])
+					if(blocksize >= 4){if( minreduction[tid] >  minreduction[tid+ 2])
 										{  minreduction[tid] =   minreduction[tid+ 2];
 										 minreductionid[tid] = minreductionid[tid+ 2];}}
-					if(blocksize >= 2){if( minreduction[tid] >=  minreduction[tid+ 1])
+					if(blocksize >= 2){if( minreduction[tid] >  minreduction[tid+ 1])
 										{  minreduction[tid] =   minreduction[tid+ 1];
 										 minreductionid[tid] = minreductionid[tid+ 1];}}}
 
@@ -93,7 +93,7 @@ __global__ void Local_Reduce_Min(int* d_y, float* d_a, float *d_f, float *d_bup_
 }
 
 __global__ void Local_Reduce_Max(int* d_y, float* d_a, float *d_f, float *d_blow_local,
-								 unsigned int* d_Ilow_local, float *d_C, int ntraining)
+								 unsigned int* d_Ilow_local, float d_C, int ntraining)
 {
 	extern __shared__ float reducearray[];
 	unsigned int tid = threadIdx.x;
@@ -110,11 +110,11 @@ __global__ void Local_Reduce_Max(int* d_y, float* d_a, float *d_f, float *d_blow
 	{
 		alpha_i = d_a[i];
 		y_i = d_y[i];
-		if ((   (y_i==1  && alpha_i>0 && alpha_i<d_C[0]) ||
-				(y_i==-1 && alpha_i>0 && alpha_i<d_C[0])) ||
-				(y_i==1  && alpha_i==d_C[0])|| (y_i==-1 && alpha_i==0))
+		if ((   (y_i==1  && alpha_i>0 && alpha_i<d_C) ||
+				(y_i==-1 && alpha_i>0 && alpha_i<d_C)) ||
+				(y_i==1  && alpha_i==d_C)|| (y_i==-1 && alpha_i==0))
 		{
-			if (maxreduction[tid] <= d_f[i])
+			if (maxreduction[tid] < d_f[i])
 			{
 				maxreduction[tid] = d_f[i];
 				maxreductionid[tid] = i;
@@ -123,35 +123,35 @@ __global__ void Local_Reduce_Max(int* d_y, float* d_a, float *d_f, float *d_blow
 		i += gridsize;
 	}
 	__syncthreads();
-	if (blocksize >= 512){if(tid < 256){if(maxreduction[tid] <=  maxreduction[tid+256])
+	if (blocksize >= 512){if(tid < 256){if(maxreduction[tid] <  maxreduction[tid+256])
 										{  maxreduction[tid] =   maxreduction[tid+256];
 										 maxreductionid[tid] = maxreductionid[tid+256];}}
 						__syncthreads();}
-	if (blocksize >= 256){if(tid < 128){if(maxreduction[tid] <=  maxreduction[tid+128])
+	if (blocksize >= 256){if(tid < 128){if(maxreduction[tid] <  maxreduction[tid+128])
 										{  maxreduction[tid] =   maxreduction[tid+128];
 										 maxreductionid[tid] = maxreductionid[tid+128];}}
 						__syncthreads();}
-	if (blocksize >= 128){if(tid < 64){if(maxreduction[tid] <=  maxreduction[tid+64])
-										{ maxreduction[tid] =   maxreduction[tid+64];
+	if (blocksize >= 128){if(tid < 64){if(maxreduction[tid] <  maxreduction[tid+64])
+										{ maxreduction[tid] =  maxreduction[tid+64];
 										maxreductionid[tid] = maxreductionid[tid+64];}}
 						__syncthreads();}
 
-	if (tid < 32){	if(blocksize >= 64){if(maxreduction[tid] <=  maxreduction[tid+32])
+	if (tid < 32){	if(blocksize >= 64){if(maxreduction[tid] <  maxreduction[tid+32])
 										{  maxreduction[tid] =   maxreduction[tid+32];
 										 maxreductionid[tid] = maxreductionid[tid+32];}}
-					if(blocksize >= 32){if(maxreduction[tid] <=  maxreduction[tid+16])
+					if(blocksize >= 32){if(maxreduction[tid] <  maxreduction[tid+16])
 										{  maxreduction[tid] =   maxreduction[tid+16];
 										 maxreductionid[tid] = maxreductionid[tid+16];}}
-					if(blocksize >= 16){if(maxreduction[tid] <=  maxreduction[tid+ 8])
+					if(blocksize >= 16){if(maxreduction[tid] <  maxreduction[tid+ 8])
 										{  maxreduction[tid] =   maxreduction[tid+ 8];
 										 maxreductionid[tid] = maxreductionid[tid+ 8];}}
-					if(blocksize >= 8){if( maxreduction[tid] <=  maxreduction[tid+ 4])
+					if(blocksize >= 8){if( maxreduction[tid] <  maxreduction[tid+ 4])
 										{  maxreduction[tid] =   maxreduction[tid+ 4];
 										 maxreductionid[tid] = maxreductionid[tid+ 4];}}
-					if(blocksize >= 4){if( maxreduction[tid] <=  maxreduction[tid+ 2])
+					if(blocksize >= 4){if( maxreduction[tid] <  maxreduction[tid+ 2])
 										{  maxreduction[tid] =   maxreduction[tid+ 2];
 										 maxreductionid[tid] = maxreductionid[tid+ 2];}}
-					if(blocksize >= 2){if( maxreduction[tid] <=  maxreduction[tid+ 1])
+					if(blocksize >= 2){if( maxreduction[tid] <  maxreduction[tid+ 1])
 										{  maxreduction[tid] =   maxreduction[tid+ 1];
 										 maxreductionid[tid] = maxreductionid[tid+ 1];}}}
 
@@ -163,21 +163,21 @@ __global__ void Local_Reduce_Max(int* d_y, float* d_a, float *d_f, float *d_blow
 }
 
 __global__ void Map( float *d_f, float *d_k, int *d_y, float *d_delta_a, unsigned int* d_I_global,
-					unsigned int *d_I_cache, int ntraining)
+					unsigned int *d_I_cache, int ntraining, int width)
 {
 	unsigned int gridsize = blockDim.x*gridDim.x;
 	unsigned int i = blockDim.x*blockIdx.x+threadIdx.x;
 
 	while ( i < ntraining)
 	{
-		d_f[i] += d_delta_a[0]*d_y[d_I_global[0]]*d_k[d_I_cache[0]+i] +  /*up */
-				  d_delta_a[1]*d_y[d_I_global[1]]*d_k[d_I_cache[1]+i];   /*low*/
+		d_f[i] += d_delta_a[0]*d_y[d_I_global[0]]*d_k[d_I_cache[0]*width+i] +  /*up */
+				  d_delta_a[1]*d_y[d_I_global[1]]*d_k[d_I_cache[1]*width+i];   /*low*/
 		i += gridsize;
 	}
 }
 
 __global__ void Update(float *d_k, int *d_y, float *d_f, float *d_a, float *d_delta_a, 
-					   unsigned int *d_I_global, unsigned int *d_I_cache, float* d_C, int *d_active, int ntraining)
+					   unsigned int *d_I_global, unsigned int *d_I_cache, float d_C, int *d_active, int ntraining, int width)
 {
 	int g_Iup = d_I_global[0];
 	int g_Ilow = d_I_global[1];
@@ -185,12 +185,10 @@ __global__ void Update(float *d_k, int *d_y, float *d_f, float *d_a, float *d_de
 	float alpha_low_old =d_a[g_Ilow];
 	float alpha_up_new = max(0, min(alpha_up_old + 
 		(d_y[g_Iup]*(d_f[g_Ilow]-d_f[g_Iup])/
-		(d_k[d_I_cache[1]*ntraining+g_Ilow]+
-		 d_k[d_I_cache[0]*ntraining+g_Iup]-
-	   2*d_k[d_I_cache[1]*ntraining+g_Iup])), *d_C));
+		(2- 2*d_k[d_I_cache[1]*width+g_Iup])), d_C));
 
 	float alpha_low_new = max(0, min(alpha_low_old+
-		d_y[g_Iup]*d_y[g_Ilow]*(alpha_up_old-alpha_up_new), *d_C));
+		d_y[g_Iup]*d_y[g_Ilow]*(alpha_up_old-alpha_up_new), d_C));
 	d_delta_a[0] = alpha_up_new-alpha_up_old;
 	d_delta_a[1] = alpha_low_new-alpha_low_old;
 	d_a[g_Iup] = alpha_up_new;
@@ -199,5 +197,39 @@ __global__ void Update(float *d_k, int *d_y, float *d_f, float *d_a, float *d_de
 	{
 		d_active[0] = 1;
 	}
-	__syncthreads();
+}
+__global__ void get_dot(float *x, float *dot, int n, int width)
+{
+	unsigned int gridsize = blockDim.x*gridDim.x;
+	unsigned int i = blockDim.x*blockIdx.x+threadIdx.x;
+	extern __shared__ float val[];
+	while ( i < n)
+	{
+	    val[threadIdx.x] = 0;
+		for (int j = 0; j < width; j++)
+		{
+			val[threadIdx.x] +=	x[i*width+j]*x[i*width+j];
+		}
+		dot[i] = val[threadIdx.x];
+		i += gridsize;
+	}
+}
+
+__global__ void get_row(float *d_k, float *tv, float gamma, int nfeatures, unsigned int irow, unsigned int icache, int ntraining, int width)
+{
+	unsigned int gridsize = blockDim.x*gridDim.x;
+	unsigned int i = blockDim.x*blockIdx.x+threadIdx.x;
+
+	while ( i < ntraining)
+	{
+		float val = 0;
+		for (int j = 0; j < nfeatures; j++)
+		{
+			val +=	tv[irow*nfeatures+j]*tv[irow*nfeatures+j]+
+					tv[i*nfeatures+j]*tv[i*nfeatures+j]-
+					2*tv[i*nfeatures+j]*tv[irow*nfeatures+j];
+		}
+		d_k[icache*width+i] = exp(-gamma*val);
+		i += gridsize;
+	}
 }

@@ -1,10 +1,10 @@
 #ifndef _SVM_DATA_H_
 #define _SVM_DATA_H_
-#define MAXTHREADS 64
+#define MAXTHREADS 128
 #define MAXBLOCKS 49152/MAXTHREADS
 #define MAXBLOCKS_TV 49152/MAXTHREADS/MAXTHREADS
-#define KMEM 1
-#define TAU 0.0001
+#define KMEM 0.7
+#define TAU 0.001
 #define min(a, b)  (((a) < (b)) ? (a) : (b))
 #define max(a, b)  (((a) > (b)) ? (a) : (b))
 
