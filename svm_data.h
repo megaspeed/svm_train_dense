@@ -3,7 +3,7 @@
 #define MAXTHREADS 128
 #define MAXBLOCKS 49152/MAXTHREADS
 #define MAXBLOCKS_TV 49152/MAXTHREADS/MAXTHREADS
-#define KMEM 0.7
+#define KMEM 0.65
 #define TAU 0.001
 #define min(a, b)  (((a) < (b)) ? (a) : (b))
 #define max(a, b)  (((a) > (b)) ? (a) : (b))
@@ -27,9 +27,11 @@ struct svm_model
 	int svm_type;
 	int kernel_type;
 	float coef_d;
-	float coef_gamma;
+	float *coef_gamma;
 	float coef_b;
-	float C;
+	float *C;
+	float *params;		/*	params C_i, gamma_i for RBF*/
+	int	ntasks;
 };
 
 #endif

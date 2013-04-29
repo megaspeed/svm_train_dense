@@ -428,8 +428,11 @@ int save_model(FILE *fp, const svm_model *model)
 			fprintf(fp, "%.16g ",sv_coef[j*nr_class+i]);
 
 		for (int j = 0; j < model->nfeatures; j++)
+		{
+			if (!SV[i*model->nfeatures+j])
+				continue;
 			fprintf(fp,"%d:%.8g ", j+1, SV[i*model->nfeatures+j]);
-
+		}
 		fprintf(fp, "\n");
 	}
 
