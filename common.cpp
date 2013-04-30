@@ -2,7 +2,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include "svm_data.h"
-
+#include <list>
+#include <algorithm>
+int cache_hit = 0;
+float *converg_time;
 #ifdef _WIN32
 
 #include <windows.h>
@@ -57,8 +60,10 @@ float cuGetTimer() { // result in miliSec
 
 #endif
 
-const char *svm_type_table[] = { "c_svc","nu_svc","one_class","epsilon_svr","nu_svr",0 };
-const char *kernel_type_table[] = { "rbf","linear","polynomial","sigmoid","precomputed",0 };
+
+/**
+* Set labels to {1;-1}
+*/
 void set_labels(svm_sample *train, svm_model *model)
 {
 	for (int i = 0; i < train->nTV; i++)
@@ -90,7 +95,7 @@ void free_model(struct svm_model *model)
 {
 	free(model->SV_dens);
 	free(model->l_SV);
-	free(model->b);
+	free(model->mass_b);
 	free(model);	
 }
 void exit_input_error(int line_num)
@@ -99,13 +104,12 @@ void exit_input_error(int line_num)
 	exit(1);
 }
 /**
-* Parses data from file in the libsvm format
-* @param inputfilename pointer to the char array that contains the file name
+* Parses data from file in the libsvm format (only 2 classes)
+* @param inputfilename pointer to file descriptor
 * @param h_xdata host pointer to the array that will store the training set
 * @param h_ldata host pointer to the array that will store the labels of the training set
 * @param nsamples number of samples in the training set
 * @param nfeatures number of features per sample in the training set
-* @param nclasses number of classes
 */
 int parse_SV(FILE* inputFilePointer, float** h_xdata, float** h_ldata, int nsamples, int nfeatures)
 {
@@ -169,6 +173,9 @@ int parse_SV(FILE* inputFilePointer, float** h_xdata, float** h_ldata, int nsamp
 	fclose(inputFilePointer);
 	return 1;
 }
+/**
+* Parses sample vectors from file in the libsvm format (only 2 classes)
+*/
 int parse_TV(FILE* inputFilePointer, svm_sample *train, svm_model *model)
 {
 	int nfeatures = model->nfeatures;
@@ -338,10 +345,11 @@ int read_model(const char* model_file_name, svm_model *model, int nfeatures)
 			fscanf(fp,"%d",&model->nSV);
 		else if(strcmp(cmd,"rho")==0)
 		{
-			int n = model->nr_class * (model->nr_class-1)/2;
-			model->b = (float*)malloc(n*sizeof(float));
-			for(int i=0;i<n;i++)
-				fscanf(fp,"%f",&model->b[i]);
+			//int n = model->nr_class * (model->nr_class-1)/2;
+			//model->b = (float*)malloc(n*sizeof(float));
+			//for(int i=0;i<n;i++)
+			//	fscanf(fp,"%f",&model->b[i]);
+			fscanf(fp,"%f",&model->b);
 		}
 		else if(strcmp(cmd,"label")==0)
 		{
@@ -384,7 +392,8 @@ void exit_with_help()
 }
 int save_model(FILE *fp, const svm_model *model)
 {
-
+	const char *svm_type_table[] = { "c_svc","nu_svc","one_class","epsilon_svr","nu_svr",0 };
+	const char *kernel_type_table[] = { "rbf","linear","polynomial","sigmoid","precomputed",0 };
 	fprintf(fp,"svm_type %s\n", svm_type_table[model->svm_type]);
 	fprintf(fp,"kernel_type %s\n", kernel_type_table[model->kernel_type]);
 
@@ -403,10 +412,11 @@ int save_model(FILE *fp, const svm_model *model)
 	fprintf(fp, "total_sv %d\n",l);
 	
 	{
-		fprintf(fp, "rho");
-		for(int i=0;i<nr_class*(nr_class-1)/2;i++)
-			fprintf(fp," %f",model->b[i]);
-		fprintf(fp, "\n");
+		//fprintf(fp, "rho");
+		//for(int i=0;i<nr_class*(nr_class-1)/2;i++)
+		//	fprintf(fp," %f",model->b[i]);
+		//fprintf(fp, "\n");
+		fprintf(fp," %f",model->b);
 	}
 	
 	if(model->label_set)
@@ -438,4 +448,106 @@ int save_model(FILE *fp, const svm_model *model)
 
 	if (ferror(fp) != 0 || fclose(fp) != 0) return -1;
 	else return 0;
+}
+/**
+* Manage cache 
+*/
+bool check_cache(unsigned int irow, unsigned int *cached_row, std::list<std::pair<unsigned int,unsigned int>> *cache, int cache_size)
+{
+	unsigned int pos = 0;
+	std::list<std::pair<unsigned int, unsigned int>>::iterator findIter;
+	for (findIter = cache->begin(); findIter != cache->end(); ++findIter, ++pos)
+	{
+		if (irow == findIter->first)
+		{
+			*cached_row = findIter->second;
+			cache->remove(*findIter);
+			cache->push_front(std::make_pair(irow, *cached_row));
+			cache_hit++;
+			return false;
+		}
+	}
+
+	if (cache->size() == cache_size)
+	{
+		*cached_row = (--findIter)->second;
+		cache->pop_back();
+	}
+	else
+	{
+		*cached_row = pos;
+	}
+	cache->push_front(std::make_pair(irow, *cached_row));
+	return true;	
+}
+/**
+* Return false if all tasks have converged
+*/
+bool chech_condition(float* B, int *active_task, int ntasks)
+{
+	bool run = false;
+	for (int i = 0; i < ntasks; i++)
+	{
+		if (B[2*i+1] <= B[2*i] + 2*TAU)
+		{
+			active_task[i] = 0;
+			if(!converg_time[i])
+			converg_time[i]=cuGetTimer();
+		}
+		run = run||active_task[i];
+	}
+	return run;
+}
+/**
+* Generate parameters set
+* @param model host pointer to model struct
+* @param cbegin first value of parameter C
+* @param c_col total # of C(i) where C(i)=C(i-1)/2
+* @param gbegin first value of parameter gamma in RBF kernel
+* @param g_col total # of gamma(i) where gamma(i)=gamma(i-1)/2
+* gamma[0] always equal 1/nfeatureas
+*/
+void set_model_param(svm_model *model, float cbegin, int c_col, float gbegin, int g_col)
+{
+	float *C = (float*)malloc((c_col)*sizeof(float));
+	float *gamma = (float*)malloc((g_col)*sizeof(float));
+	C[0] = cbegin;
+	for (int i = 1; i < c_col; i++)
+	{
+		C[i] = C[i-1]/2;
+	}
+
+	gamma[0] = 1./model->nfeatures;
+	if(g_col > 1)
+		gamma[1] = gbegin;
+	for (int i = 2; i < g_col; i++)
+	{
+		gamma[i] = gamma[i-1]/2;
+	}
+
+	model->ntasks = c_col*g_col;
+	model->params = (float*)malloc(model->ntasks*2*sizeof(float));
+	for (int i = 0; i < c_col; i++)
+	{
+		for (int j = 0; j < g_col; j++)
+		{
+			model->params[2*i*g_col+2*j] = C[i];
+			model->params[2*i*g_col+2*j+1] = gamma[j];
+		}
+	}
+	model->kernel_type = 0;
+	model->svm_type = 0;
+	free(C);
+	free(gamma);
+}
+/**
+* Divide train data into train and test subsets in a ratio percent
+*/
+void balabce_data(svm_sample *train, svm_sample *test, float percent)
+{
+	int train_part = (int)(train->nTV*percent);
+	test->nTV = train->nTV - train_part;
+	train->nTV = train_part;
+	test->l_TV = &train->l_TV[train_part];
+	test->TV = &train->TV[train_part];
 }

@@ -21,7 +21,16 @@ __global__ void initialization( float *d_a, float *d_f, int *d_y, int ntraining)
 	}
 	__syncthreads();
 }
-
+/**
+* Make local reduce of treshold parameter Bup
+* @param d_y device pointer to the array with binary labels
+* @param d_a device pointer to the array with the alphas
+* @param d_f device pointer to the intermediate values of f 
+* @param d_bup_local device pointer to localy reduced Bup
+* @param d_Iup_local device pointer to the array Bup indeces
+* @param d_C parameter C
+* @param ntraining # of training samples
+*/
 __global__ void Local_Reduce_Min(int* d_y, float* d_a, float *d_f, float *d_bup_local,
 								 unsigned int* d_Iup_local, float d_C, int ntraining)
 {
@@ -92,6 +101,16 @@ __global__ void Local_Reduce_Min(int* d_y, float* d_a, float *d_f, float *d_bup_
 	}
 }
 
+/**
+* Make local reduce of treshold parameter Blow
+* @param d_y device pointer to the array with binary labels
+* @param d_a device pointer to the array with the alphas
+* @param d_f device pointer to the intermediate values of f 
+* @param d_blow_local device pointer to localy reduced Blow
+* @param d_Ilow_local device pointer to the array Bup indeces
+* @param d_C parameter C
+* @param ntraining # of training samples
+*/
 __global__ void Local_Reduce_Max(int* d_y, float* d_a, float *d_f, float *d_blow_local,
 								 unsigned int* d_Ilow_local, float d_C, int ntraining)
 {
@@ -162,6 +181,17 @@ __global__ void Local_Reduce_Max(int* d_y, float* d_a, float *d_f, float *d_blow
 	}
 }
 
+/**
+* Recalculate value of f function
+* @param d_f device pointer to the intermediate values of f 
+* @param d_k device pointer to the kernel matrix
+* @param d_y device pointer to the array with binary labels
+* @param d_delta_a device pointer to the array with  alphas_new-alphas_old
+* @param d_I_global device pointer to global index of kernel matrix row
+* @param d_I_cache device pointer to index of kernel matrix row in cache
+* @param d_active device pointer to the array tasks statuses
+* @param ntraining # of training samples
+*/
 __global__ void Map( float *d_f, float *d_k, int *d_y, float *d_delta_a, unsigned int* d_I_global,
 					unsigned int *d_I_cache, int *d_active, int ntraining)
 {
@@ -179,11 +209,22 @@ __global__ void Map( float *d_f, float *d_k, int *d_y, float *d_delta_a, unsigne
 		}
 	}
 }
-
+/**
+* Update curently optimazed Lagrange multiplyers
+* @param d_k device pointer to the kernel matrix
+* @param d_y device pointer to the array with binary labels
+* @param d_f device pointer to the intermediate values of f 
+* @param d_a device pointer to the array with Lagrange multiplyers alphas
+* @param d_I_global device pointer to global index of kernel matrix row
+* @param d_I_cache device pointer to index of kernel matrix row in cache
+* @param d_C parameter C
+* @param d_active device pointer to the array tasks statuses
+* @param ntraining # of training samples
+*/
 __global__ void Update(float *d_k, int *d_y, float *d_f, float *d_a, float *d_delta_a, 
 					   unsigned int *d_I_global, unsigned int *d_I_cache, float* C, int *d_active, int ntraining)
 {
-	unsigned int i = threadIdx.y;//task number
+	unsigned int i = threadIdx.x;//task number
 	if (d_active[i] == 1)
 	{
 		int g_Iup = d_I_global[2*i];
@@ -205,23 +246,17 @@ __global__ void Update(float *d_k, int *d_y, float *d_f, float *d_a, float *d_de
 	}
 	__syncthreads();
 }
-__global__ void get_dot(float *x, float *dot, int n, int width)
-{
-	unsigned int gridsize = blockDim.x*gridDim.x;
-	unsigned int i = blockDim.x*blockIdx.x+threadIdx.x;
-	extern __shared__ float val[];
-	while ( i < n)
-	{
-		val[threadIdx.x] = 0;
-		for (int j = 0; j < width; j++)
-		{
-			val[threadIdx.x] +=	x[i*width+j]*x[i*width+j];
-		}
-		dot[i] = val[threadIdx.x];
-		i += gridsize;
-	}
-}
 
+/**
+* Calculate kernel matrix row
+* @param d_k device pointer to the kernel matrix
+* @param tv device pointer to the train vectors
+* @param gamma parameter gamma for RBF kernel
+* @param nfeatures # of features
+* @param irow  global index of kernel matrix row
+* @param icache index of kernel matrix row in cache
+* @param ntraining # of training samples
+*/
 __global__ void get_row(float *d_k, float *tv, float gamma, int nfeatures, unsigned int irow, unsigned int icache, int ntraining)
 {
 	unsigned int gridsize = blockDim.x*gridDim.x;
@@ -239,4 +274,48 @@ __global__ void get_row(float *d_k, float *tv, float gamma, int nfeatures, unsig
 		d_k[icache*ntraining+i] = exp(-gamma*val);
 		i += gridsize;
 	}
+}
+/**
+* Make local reduce for classification task
+* @param d_SV device pointer to the support vectors
+* @param d_TV device pointer to the train vectors
+* @param d_koef device pointer to array with y[i]*alfa[i] for each SV
+* @param nSV # of support vectors
+* @param ncol  # of features
+* @param gamma parameter gamma for RBF kernel
+* @param kernelcode kernel code
+* @param result value of local reduction
+*/
+__global__ void reduction( float *d_SV, float *d_TV, float *d_koef, int nSV, int ncol, float gamma, int kernelcode, float *result)
+{
+	unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+	const unsigned int blockSize = blockDim.x;
+	const unsigned int tid = threadIdx.x;
+	extern __shared__  float reduct[];
+	reduct[tid]= 0;
+	while (i < nSV)
+	{
+		if(kernelcode == 0)	
+		{
+			float val = 0;
+			for (int j = 0; j < ncol; j++)
+			{
+				val += (d_TV[j]-d_SV[i*ncol+j])*(d_TV[j]-d_SV[i*ncol+j]);
+			}
+			reduct[tid] +=  d_koef[i]*expf(-gamma*val);
+		}
+		i += blockSize*gridDim.x;
+	}
+	__syncthreads();
+		if(blockSize>=512)	{if(tid<256){reduct[tid] += reduct[tid + 256];}__syncthreads();}
+	if(blockSize>=256)	{if(tid<128){reduct[tid] += reduct[tid + 128];}__syncthreads();}
+	if(blockSize>=128)  {if(tid<64)	{reduct[tid] += reduct[tid + 64];}__syncthreads();}
+	if(tid<32){	if(blockSize >= 64)	{reduct[tid] += reduct[tid + 32];}
+				if(blockSize >= 32)	{reduct[tid] += reduct[tid + 16];}
+				if(blockSize >= 16)	{reduct[tid] += reduct[tid + 8];}
+				if(blockSize >= 8)	{reduct[tid] += reduct[tid + 4];}
+				if(blockSize >= 4)	{reduct[tid] += reduct[tid + 2];}
+				if(blockSize >= 2)	{reduct[tid] += reduct[tid + 1];}	}
+	if(tid==0){	result[blockIdx.x]=reduct[0];}
+
 }

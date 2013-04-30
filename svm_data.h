@@ -22,15 +22,16 @@ struct svm_model
 	int nfeatures;		/*	# of SV's features		*/
 	float *SV_dens;		/*	SVs in dense format		*/
 	float *l_SV;		/*	SV's labels				*/
-	float *b;			/*	classification parametr	*/	
+	float b;			/*	classification parametr	*/	
 	int *label_set;		/*  intput lables			*/
 	int svm_type;
 	int kernel_type;
 	float coef_d;
-	float *coef_gamma;
+	float coef_gamma;
 	float coef_b;
-	float *C;
+	float C;
 	float *params;		/*	params C_i, gamma_i for RBF*/
+	float* mass_b;
 	int	ntasks;
 };
 
