@@ -13,12 +13,6 @@
 
 void classifier(svm_model *model, svm_sample *test, float *rate)
 {
-	float reductiontime = 0;
-	float intervaltime;
-	cudaEvent_t start, stop;
-	cudaEventCreate ( &start );cudaCheck
-	cudaEventCreate ( &stop  );cudaCheck
-
 	int nTV = test->nTV;
 	int nSV = model->nSV;
 	int nfeatures = model->nfeatures;
@@ -28,7 +22,7 @@ void classifier(svm_model *model, svm_sample *test, float *rate)
 	cudaMalloc((void**) &d_SV, nSV*nfeatures*sizeof(float));cudaCheck
 	cudaMemcpy(d_SV, model->SV_dens, nSV*nfeatures*sizeof(float),cudaMemcpyHostToDevice);cudaCheck
 
-		float *d_l_SV = 0;
+	float *d_l_SV = 0;
 	cudaMalloc((void**) &d_l_SV, nSV*sizeof(float));cudaCheck
 	cudaMemcpy(d_l_SV, model->l_SV, nSV*sizeof(float),cudaMemcpyHostToDevice);cudaCheck
 
@@ -107,8 +101,10 @@ void Reduce_step(int *d_y, float *d_a, float *d_f, float *d_B, unsigned int *d_I
 	{
 		if (active[itask] == 1)
 		{
-			Local_Reduce_Min<<<nblocks, MAXTHREADS, smem>>>(d_y, &d_a[itask*ntraining], &d_f[itask*ntraining], &d_B[itask*2*nblocks], &d_I[itask*2*nblocks], param[2*itask], ntraining);
-			Local_Reduce_Max<<<nblocks, MAXTHREADS, smem>>>(d_y, &d_a[itask*ntraining], &d_f[itask*ntraining], &d_B[itask*2*nblocks+nblocks], &d_I[itask*2*nblocks+nblocks], param[2*itask], ntraining);
+			Local_Reduce_Min<<<nblocks, MAXTHREADS, smem>>>(d_y, &d_a[itask*ntraining], &d_f[itask*ntraining], &d_B[itask*2*nblocks], &d_I[itask*2*nblocks], &param[2*itask], ntraining);
+
+			Local_Reduce_Max<<<nblocks, MAXTHREADS, smem>>>(d_y, &d_a[itask*ntraining], &d_f[itask*ntraining], &d_B[itask*2*nblocks+nblocks], &d_I[itask*2*nblocks+nblocks], &param[2*itask], ntraining);
+					//cudaDeviceSynchronize();
 		}
 	}
 	cudaMemcpy(h_B, d_B, ntasks*2*nblocks*sizeof(float), cudaMemcpyDeviceToHost);
@@ -145,19 +141,16 @@ void Reduce_step(int *d_y, float *d_a, float *d_f, float *d_B, unsigned int *d_I
 	}
 }
 
-
 void cross_validation(svm_sample *train, svm_model *model)
 {
-	cudaEvent_t start, stop;
-	cudaEventCreate ( &start );
-	cudaEventCreate ( &stop  );
-
 	int ntasks = model->ntasks;
 	int nTV = train->nTV;
 	int nfeatures = model->nfeatures;
 	//Grid configuration
 	int nthreads = MAXTHREADS;
 	int nblocks = min(MAXBLOCKS, (nthreads + nTV - 1)/nthreads);
+	int task_threads = min(1024/MAXTHREADS, ntasks);
+	int task_blocks = (ntasks + task_threads - 1)/task_threads;
 
 	float *d_TV = 0;//training vectors
 	cudaMalloc((void**) &d_TV, nTV*nfeatures*sizeof(float));
@@ -165,7 +158,7 @@ void cross_validation(svm_sample *train, svm_model *model)
 
 	float *d_SV = 0;//support vectors
 
-	float *d_params = 0;// binary labels
+	float *d_params = 0;
 	cudaMalloc((void**) &d_params, 2*ntasks*sizeof(float));
 	cudaMemcpy(d_params, model->params, 2*ntasks*sizeof(float),cudaMemcpyHostToDevice);
 
@@ -176,7 +169,6 @@ void cross_validation(svm_sample *train, svm_model *model)
 	float *d_a = 0; //alphas
 	cudaMalloc((void**) &d_a, ntasks*nTV*sizeof(float));
 
-	float *h_f = (float*)malloc(ntasks*nTV*sizeof(float));
 	float *d_f = 0;//object functions
 	cudaMalloc((void**) &d_f, ntasks*nTV*sizeof(float));
 
@@ -200,7 +192,6 @@ void cross_validation(svm_sample *train, svm_model *model)
 	unsigned int *d_I_cache = 0; 
 	cudaMalloc((void**) &d_I_cache, 2*ntasks*sizeof(unsigned int));
 
-	float *h_delta_a = (float*)malloc(2*ntasks*sizeof(float));
 	float *d_delta_a = 0;
 	cudaMalloc((void**) &d_delta_a, 2*ntasks*sizeof(float));
 
@@ -212,36 +203,28 @@ void cross_validation(svm_sample *train, svm_model *model)
 	cudaMalloc((void**) &d_active, ntasks*sizeof(int));
 	cudaMemcpy(d_active, h_active, ntasks*sizeof(int),cudaMemcpyHostToDevice);
 
-	initialization<<<dim3(nblocks, 1), dim3(nthreads, ntasks)>>>(d_a, d_f, d_y, nTV);
-	Reduce_step(d_y, d_a, d_f, d_B, d_I, model->params, nTV, nblocks, h_B, h_I, h_B_global, h_I_global, h_active, ntasks);
+
+	initialization<<<dim3(nblocks, task_blocks), dim3(nthreads, task_threads)>>>(d_a, d_f, d_y, nTV, ntasks);
+	cudaDeviceSynchronize();
+	Reduce_step(d_y, d_a, d_f, d_B, d_I, d_params, nTV, nblocks, h_B, h_I, h_B_global, h_I_global, h_active, ntasks);
 
 	unsigned int remainingMemory;
 	unsigned int totalMemory;
 	cudaMemGetInfo(&remainingMemory, &totalMemory);
-
 	printf("%u bytes of memory found on device, %u bytes currently free\n", totalMemory, remainingMemory);
-
 	int sizeOfCache = remainingMemory/(nTV*sizeof(float));
-
 	sizeOfCache = (int)((float)sizeOfCache*KMEM);
 	if (nTV < sizeOfCache)
 		sizeOfCache = nTV;
-
 	printf("%u rows of kernel matrix will be cached (%u bytes per row)\n", sizeOfCache, nTV*sizeof(float));
 
 	float *d_k = 0;// gramm matrix
 	cudaMalloc((void**) &d_k, sizeOfCache*nTV*sizeof(float));
 
-	cudaStream_t *stream = (cudaStream_t*)malloc(2*sizeof(cudaStream_t));
-	for (int i = 0; i < 2; i++)
-	{
-		cudaStreamCreate(&stream[i]);
-	}
-
 	int iter = 0;
-	std::list<std::pair<unsigned int, unsigned int>>cache;
-
-	while (chech_condition(h_B_global, h_active, ntasks))
+	std::list<std::pair<unsigned int,unsigned int> > cache;
+	
+	while (chech_condition(h_B_global, h_active, ntasks, iter))
 	{
 		++iter;	
 		for (int itask = 0; itask < ntasks; itask++)
@@ -249,29 +232,26 @@ void cross_validation(svm_sample *train, svm_model *model)
 			if (h_active[itask] == 1)
 			{
 				if(check_cache(h_I_global[2*itask], &h_I_cache[2*itask], &cache, sizeOfCache))		//Iup - second
-					get_row<<<nblocks, nthreads,0,stream[0]>>>(d_k, d_TV, model->params[2*itask+1], nfeatures, h_I_global[2*itask], h_I_cache[2*itask], nTV);
+					get_row<<<nblocks, nthreads>>>(d_k, d_TV, nfeatures, h_I_global[2*itask], h_I_cache[2*itask], nTV);
 				if(check_cache(h_I_global[2*itask+1], &h_I_cache[2*itask+1], &cache, sizeOfCache))//Ilow - fist
-					get_row<<<nblocks, nthreads,0,stream[1]>>>(d_k, d_TV, model->params[2*itask+1], nfeatures, h_I_global[2*itask+1], h_I_cache[2*itask+1], nTV);
+					get_row<<<nblocks, nthreads>>>(d_k, d_TV, nfeatures, h_I_global[2*itask+1], h_I_cache[2*itask+1], nTV);
 			}
 		}
-
 		cudaMemcpy(d_active, h_active, ntasks*sizeof(int),cudaMemcpyHostToDevice);
 		cudaMemcpy(d_I_cache, h_I_cache, ntasks*2*sizeof(unsigned int),cudaMemcpyHostToDevice);
 		cudaMemcpy(d_I_global, h_I_global, ntasks*2*sizeof(unsigned int),cudaMemcpyHostToDevice);
 
 		Update<<<1,ntasks>>>(d_k, d_y, d_f, d_a, d_delta_a, d_I_global, d_I_cache, d_params, d_active, nTV);
-		cudaMemcpy(h_delta_a, d_delta_a, 2*ntasks*sizeof(float),cudaMemcpyDeviceToHost);
 		cudaDeviceSynchronize();
-		Map<<<dim3(nblocks, 1), dim3(nthreads, ntasks)>>>(d_f, d_k, d_y, d_delta_a, d_I_global, d_I_cache, d_active, nTV);
+		Map<<<dim3(nblocks, task_blocks), dim3(nthreads, task_threads)>>>(d_f, d_k, d_y, d_delta_a, d_I_global, d_I_cache, d_params, d_active, nTV);
 		cudaDeviceSynchronize();
-		cudaMemcpy(h_f, d_f, nTV*ntasks*sizeof(float), cudaMemcpyDeviceToHost);
-		Reduce_step(d_y, d_a, d_f, d_B, d_I, model->params, nTV, nblocks, h_B, h_I, h_B_global, h_I_global, h_active, ntasks);
+		Reduce_step(d_y, d_a, d_f, d_B, d_I, d_params, nTV, nblocks, h_B, h_I, h_B_global, h_I_global, h_active, ntasks);
 	}
 	printf("All tasks convergented in %f\n", cuGetTimer());
 
-	//predict
 	model->l_SV = (float*)malloc(nTV*ntasks*sizeof(float));
 	cudaMemcpy(model->l_SV, d_a, nTV*ntasks*sizeof(float), cudaMemcpyDeviceToHost);
+
 	model->mass_b = (float*)malloc(ntasks*sizeof(float));
 	for (int itask = 0; itask < model->ntasks; itask++)
 	{
@@ -280,9 +260,9 @@ void cross_validation(svm_sample *train, svm_model *model)
 	cudaDeviceReset();
 }
 
-void classification( svm_sample *test, svm_model *model)
+void classification( svm_sample *train, svm_sample *test, svm_model *model, FILE *output)
 {
-	int nTV = test->nTV;
+	int ntraining = train->nTV;
 	float *buf_l = model->l_SV;
 	float rate;
 	float max_rate = 0;
@@ -290,22 +270,24 @@ void classification( svm_sample *test, svm_model *model)
 
 	for (int itask = 0; itask < model->ntasks; itask++)
 	{
-		float *SV = (float*)malloc(test->nTV*model->nfeatures*sizeof(float));
-		float *l_sv = (float*)malloc(nTV*sizeof(float));
-		model->l_SV = &buf_l[itask*nTV];
+		float *SV = (float*)malloc(ntraining*model->nfeatures*sizeof(float));
+		float *l_sv = (float*)malloc(ntraining*sizeof(float));
+		model->l_SV = &buf_l[itask*ntraining];
 		int nSV = 0;
-		for (int i = 0; i < nTV; i++)
+		for (int i = 0; i < ntraining; i++)
 		{
 			if (model->l_SV[i] != 0)
 			{
-				if (i != nSV)
-				{
-					l_sv[nSV] = test->l_TV[i]*model->l_SV[i];
-					for (int j = 0; j < model->nfeatures; j++)
-						SV[nSV*model->nfeatures+j] = test->TV[i*model->nfeatures+j];
-				}	
+				l_sv[nSV] = train->l_TV[i]*model->l_SV[i];
+				for (int j = 0; j < model->nfeatures; j++)
+					SV[nSV*model->nfeatures+j] = train->TV[i*model->nfeatures+j];
 				++nSV;
 			}
+		}
+		if (nSV == 0)
+		{
+			printf("Task %d has bad parameters C=%f and gamma=%f #SV=%d\n",itask, model->params[2*itask], model->params[2*itask+1], nSV);
+			continue;
 		}
 		model->nSV = nSV;
 		model->b = model->mass_b[itask];
@@ -314,6 +296,7 @@ void classification( svm_sample *test, svm_model *model)
 		model->l_SV=(float*)realloc(l_sv, nSV*sizeof(float));
 		model->SV_dens=(float*)realloc(SV, nSV*model->nfeatures*sizeof(float));
 		classifier(model, test, &rate);
+		//save_model(output, model);
 		if (max_rate < rate)
 		{
 			max_rate = rate;
@@ -336,16 +319,18 @@ void classification( svm_sample *test, svm_model *model)
 
 int main(int argc, char **argv)
 {
-	FILE *input, *output;
+	FILE *input_train, *input_test, *output;
 	if (argc==1)
 	{
-		argc = 4;
+		argc = 5;
 		//argv[1] = "C:\\Data\\b.txt";
 		//argv[2] = "C:\\Data\\b.model";
-		//argv[3] = "10";
+		//argv[3] = "C:\\Data\\b.txt";
+		//argv[4] = "10";
 		argv[1] = "C:\\Data\\a9a";
 		argv[2] = "C:\\Data\\a9a.model";
-		argv[3] = "123";
+		argv[3] = "C:\\Data\\a9a.t";
+		argv[4] = "123";
 		//argv[1] = "C:\\Data\\mushrooms";
 		//argv[2] = "C:\\Data\\mushrooms.model";
 		//argv[3] = "112";
@@ -354,14 +339,14 @@ int main(int argc, char **argv)
 		//argv[3] = "22";
 
 	}
-	if(argc<4)
+	if(argc<5)
 		exit_with_help();
 	struct svm_model *model = (svm_model*)malloc(sizeof(svm_model));
 	struct svm_sample *train = (svm_sample*)malloc(sizeof(svm_sample));
 	struct svm_sample *test = (svm_sample*)malloc(sizeof(svm_sample));
-	sscanf(argv[3],"%d",&model->nfeatures);
+	sscanf(argv[4],"%d",&model->nfeatures);
 
-	if((input = fopen(argv[1],"r")) == NULL)
+	if((input_train = fopen(argv[1],"r")) == NULL)
 	{
 		fprintf(stderr,"can't open training file %s\n",argv[1]);
 		exit(1);
@@ -372,20 +357,25 @@ int main(int argc, char **argv)
 		fprintf(stderr,"can't create model file %s\n",argv[2]);
 		exit(1);
 	}
+	if((input_test = fopen(argv[3],"r")) == NULL)
+	{
+		fprintf(stderr,"can't open input file %s\n",argv[1]);
+		exit(1);
+	}
+
 	float percent = 0.8;
-	set_model_param(model, 1, 4, 0.01, 2);
+	set_model_param(model, 1, 8, 0.04, 4);
 	converg_time= (float*)malloc(model->ntasks*sizeof(float));
 	for (int itask = 0; itask < model->ntasks; itask++)
 		converg_time[itask] = 0;
-	
-	parse_TV(input, train, model);
+	parse_TV(input_test, test, model);
+	parse_TV(input_train, train, model);
+	set_labels(test, model);
 	set_labels(train, model);
-	balabce_data(train, test, percent);
+	//balabce_data(train, test, percent);
 	cuResetTimer();
 	cross_validation(train, model);
-	for (int itask = 0; itask < model->ntasks; itask++)
-		printf("Task %d has convergent in %f\n", itask, converg_time[itask]);
-	classification(test, model);
+	classification(train, test, model, output);
 	printf("Total time %f cache hits %d\n", cuGetTimer(), cache_hit);
 	cudaDeviceReset();
 	return 0;

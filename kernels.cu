@@ -9,14 +9,14 @@
 * @param d_y device pointer to the array with binary labels
 * @param ntraining number of training samples in the training set
 */
-__global__ void initialization( float *d_a, float *d_f, int *d_y, int ntraining)
+__global__ void initialization( float *d_a, float *d_f, int *d_y, int ntraining, int ntasks)
 {
 	unsigned int i = blockIdx.x*blockDim.x+threadIdx.x;
-	unsigned int idy = threadIdx.y;
-	while ( i < ntraining)
+	unsigned int j = blockIdx.y*blockDim.y+threadIdx.y;
+	while ( i < ntraining && j < ntasks)
 	{
-		d_a[i+idy*ntraining] = 0.;
-		d_f[i+idy*ntraining] = -1.*d_y[i];
+		d_a[i+j*ntraining] = 0.;
+		d_f[i+j*ntraining] = -1.*d_y[i];
 		i += blockDim.x*gridDim.x;
 	}
 	__syncthreads();
@@ -32,7 +32,7 @@ __global__ void initialization( float *d_a, float *d_f, int *d_y, int ntraining)
 * @param ntraining # of training samples
 */
 __global__ void Local_Reduce_Min(int* d_y, float* d_a, float *d_f, float *d_bup_local,
-								 unsigned int* d_Iup_local, float d_C, int ntraining)
+								 unsigned int* d_Iup_local, float *d_C, int ntraining)
 {
 	extern __shared__ float reducearray[];
 	unsigned int tid = threadIdx.x;
@@ -49,9 +49,9 @@ __global__ void Local_Reduce_Min(int* d_y, float* d_a, float *d_f, float *d_bup_
 	{
 		alpha_i = d_a[i];
 		y_i = d_y[i];
-		if ((   (y_i==1  && alpha_i>0 && alpha_i<d_C) ||
-			(y_i==-1 && alpha_i>0 && alpha_i<d_C)) ||
-			(y_i==1  && alpha_i==0)|| (y_i==-1 && alpha_i==d_C))
+		if ((   (y_i==1  && alpha_i>0 && alpha_i<*d_C) ||
+			(y_i==-1 && alpha_i>0 && alpha_i<*d_C)) ||
+			(y_i==1  && alpha_i==0)|| (y_i==-1 && alpha_i==*d_C))
 		{
 			if (minreduction[tid] > d_f[i])
 			{
@@ -112,7 +112,7 @@ __global__ void Local_Reduce_Min(int* d_y, float* d_a, float *d_f, float *d_bup_
 * @param ntraining # of training samples
 */
 __global__ void Local_Reduce_Max(int* d_y, float* d_a, float *d_f, float *d_blow_local,
-								 unsigned int* d_Ilow_local, float d_C, int ntraining)
+								 unsigned int* d_Ilow_local, float *d_C, int ntraining)
 {
 	extern __shared__ float reducearray[];
 	unsigned int tid = threadIdx.x;
@@ -129,9 +129,9 @@ __global__ void Local_Reduce_Max(int* d_y, float* d_a, float *d_f, float *d_blow
 	{
 		alpha_i = d_a[i];
 		y_i = d_y[i];
-		if ((   (y_i==1  && alpha_i>0 && alpha_i<d_C) ||
-			(y_i==-1 && alpha_i>0 && alpha_i<d_C)) ||
-			(y_i==1  && alpha_i==d_C)|| (y_i==-1 && alpha_i==0))
+		if ((   (y_i==1  && alpha_i>0 && alpha_i<*d_C) ||
+			(y_i==-1 && alpha_i>0 && alpha_i<*d_C)) ||
+			(y_i==1  && alpha_i==*d_C)|| (y_i==-1 && alpha_i==0))
 		{
 			if (maxreduction[tid] < d_f[i])
 			{
@@ -193,18 +193,18 @@ __global__ void Local_Reduce_Max(int* d_y, float* d_a, float *d_f, float *d_blow
 * @param ntraining # of training samples
 */
 __global__ void Map( float *d_f, float *d_k, int *d_y, float *d_delta_a, unsigned int* d_I_global,
-					unsigned int *d_I_cache, int *d_active, int ntraining)
+					unsigned int *d_I_cache, float *params, int *d_active, int ntraining)
 {
 	unsigned int gridsize = blockDim.x*gridDim.x;
 	unsigned int i = blockDim.x*blockIdx.x+threadIdx.x;
-	unsigned int j = threadIdx.y;
+	unsigned int j = blockIdx.y*blockDim.y+threadIdx.y;
 
 	if (d_active[j] == 1)
 	{
 		while ( i < ntraining)
 		{
-			d_f[j*ntraining+i] += d_delta_a[2*j]*d_y[d_I_global[2*j]]*d_k[d_I_cache[2*j]*ntraining+i] +  /*up */
-				d_delta_a[2*j+1]*d_y[d_I_global[2*j+1]]*d_k[d_I_cache[2*j+1]*ntraining+i];   /*low*/
+			d_f[j*ntraining+i] += d_delta_a[2*j]*d_y[d_I_global[2*j]]*exp(-params[2*j+1]*d_k[d_I_cache[2*j]*ntraining+i]) +  /*up */
+				d_delta_a[2*j+1]*d_y[d_I_global[2*j+1]]*exp(-params[2*j+1]*d_k[d_I_cache[2*j+1]*ntraining+i]);   /*low*/
 			i += gridsize;
 		}
 	}
@@ -229,12 +229,12 @@ __global__ void Update(float *d_k, int *d_y, float *d_f, float *d_a, float *d_de
 	{
 		int g_Iup = d_I_global[2*i];
 		int g_Ilow = d_I_global[2*i+1];
-		float alpha_up_old =d_a[g_Iup];
-		float alpha_low_old =d_a[g_Ilow];
+		float alpha_up_old =d_a[i*ntraining+g_Iup];
+		float alpha_low_old =d_a[i*ntraining+g_Ilow];
 
 		float alpha_up_new = max(0, min(alpha_up_old + 
 			(d_y[g_Iup]*(d_f[i*ntraining+g_Ilow]-d_f[i*ntraining+g_Iup])/
-			(2- 2*d_k[d_I_cache[2*i+1]*ntraining+g_Iup])), C[2*i]));
+			(2- 2*exp(-C[2*i+1]*d_k[d_I_cache[2*i+1]*ntraining+g_Iup]))), C[2*i]));
 
 		float alpha_low_new = max(0, min(alpha_low_old+
 			d_y[g_Iup]*d_y[g_Ilow]*(alpha_up_old-alpha_up_new), C[2*i]));
@@ -257,7 +257,7 @@ __global__ void Update(float *d_k, int *d_y, float *d_f, float *d_a, float *d_de
 * @param icache index of kernel matrix row in cache
 * @param ntraining # of training samples
 */
-__global__ void get_row(float *d_k, float *tv, float gamma, int nfeatures, unsigned int irow, unsigned int icache, int ntraining)
+__global__ void get_row(float *d_k, float *tv, int nfeatures, unsigned int irow, unsigned int icache, int ntraining)
 {
 	unsigned int gridsize = blockDim.x*gridDim.x;
 	unsigned int i = blockDim.x*blockIdx.x+threadIdx.x;
@@ -271,7 +271,7 @@ __global__ void get_row(float *d_k, float *tv, float gamma, int nfeatures, unsig
 				tv[i*nfeatures+j]*tv[i*nfeatures+j]-
 				2*tv[i*nfeatures+j]*tv[irow*nfeatures+j];
 		}
-		d_k[icache*ntraining+i] = exp(-gamma*val);
+		d_k[icache*ntraining+i] = val;
 		i += gridsize;
 	}
 }

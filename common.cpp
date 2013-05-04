@@ -4,6 +4,7 @@
 #include "svm_data.h"
 #include <list>
 #include <algorithm>
+#include <tuple>
 int cache_hit = 0;
 float *converg_time;
 #ifdef _WIN32
@@ -66,6 +67,12 @@ float cuGetTimer() { // result in miliSec
 */
 void set_labels(svm_sample *train, svm_model *model)
 {
+	int buf = model->label_set[0];
+	if (buf < model->label_set[1])
+	{
+		model->label_set[0] = model->label_set[1];
+		model->label_set[1] = buf;
+	}
 	for (int i = 0; i < train->nTV; i++)
 	{
 		if (train->l_TV[i] == model->label_set[0])
@@ -412,11 +419,11 @@ int save_model(FILE *fp, const svm_model *model)
 	fprintf(fp, "total_sv %d\n",l);
 	
 	{
-		//fprintf(fp, "rho");
+		fprintf(fp, "rho");
 		//for(int i=0;i<nr_class*(nr_class-1)/2;i++)
-		//	fprintf(fp," %f",model->b[i]);
-		//fprintf(fp, "\n");
+		//	fprintf(fp," %f",model->b[i]);		
 		fprintf(fp," %f",model->b);
+		fprintf(fp, "\n");
 	}
 	
 	if(model->label_set)
@@ -452,6 +459,34 @@ int save_model(FILE *fp, const svm_model *model)
 /**
 * Manage cache 
 */
+bool check_cache1(unsigned int irow, unsigned int *cached_row, float param, std::list<std::pair<float,std::pair<unsigned int,unsigned int> > > *cache, int cache_size)
+{
+	unsigned int pos = 0;
+	std::list<std::pair<float,std::pair<unsigned int,unsigned int> > >::iterator findIter;
+	for (findIter = cache->begin(); findIter != cache->end(); ++findIter, ++pos)
+	{
+		if (irow == findIter->second.first && param == findIter->first)
+		{
+			*cached_row = findIter->second.second;
+			cache->remove(*findIter);
+			cache->push_front(std::make_pair(param, std::make_pair(irow, *cached_row)));
+			cache_hit++;
+			return false;
+		}
+	}
+
+	if (cache->size() == cache_size)
+	{
+		*cached_row = (--findIter)->second.second;
+		cache->pop_back();
+	}
+	else
+	{
+		*cached_row = pos;
+	}
+	cache->push_front(std::make_pair(param, std::make_pair(irow, *cached_row)));
+	return true;
+}
 bool check_cache(unsigned int irow, unsigned int *cached_row, std::list<std::pair<unsigned int,unsigned int>> *cache, int cache_size)
 {
 	unsigned int pos = 0;
@@ -483,7 +518,7 @@ bool check_cache(unsigned int irow, unsigned int *cached_row, std::list<std::pai
 /**
 * Return false if all tasks have converged
 */
-bool chech_condition(float* B, int *active_task, int ntasks)
+bool chech_condition(float* B, int *active_task, int ntasks, int iter)
 {
 	bool run = false;
 	for (int i = 0; i < ntasks; i++)
@@ -491,8 +526,10 @@ bool chech_condition(float* B, int *active_task, int ntasks)
 		if (B[2*i+1] <= B[2*i] + 2*TAU)
 		{
 			active_task[i] = 0;
-			if(!converg_time[i])
-			converg_time[i]=cuGetTimer();
+			if(!converg_time[i]){
+				converg_time[i]=cuGetTimer();
+				printf("Task %d has convergent in %f on iter=%d\n", i, converg_time[i], iter);
+			}
 		}
 		run = run||active_task[i];
 	}
@@ -550,4 +587,8 @@ void balabce_data(svm_sample *train, svm_sample *test, float percent)
 	train->nTV = train_part;
 	test->l_TV = &train->l_TV[train_part];
 	test->TV = &train->TV[train_part];
+	//test->nTV=train->nTV;
+	//test->l_TV=train->l_TV;
+	//test->TV=train->TV;
+
 }
