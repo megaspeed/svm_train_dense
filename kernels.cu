@@ -261,15 +261,13 @@ __global__ void get_row(float *d_k, float *tv, int nfeatures, unsigned int irow,
 {
 	unsigned int gridsize = blockDim.x*gridDim.x;
 	unsigned int i = blockDim.x*blockIdx.x+threadIdx.x;
-
 	while ( i < ntraining)
 	{
+
 		float val = 0;
 		for (int j = 0; j < nfeatures; j++)
 		{
-			val +=	tv[irow*nfeatures+j]*tv[irow*nfeatures+j]+
-				tv[i*nfeatures+j]*tv[i*nfeatures+j]-
-				2*tv[i*nfeatures+j]*tv[irow*nfeatures+j];
+			val +=	(tv[irow*nfeatures+j]-tv[i*nfeatures+j])*(tv[irow*nfeatures+j]-tv[i*nfeatures+j]);
 		}
 		d_k[icache*ntraining+i] = val;
 		i += gridsize;
@@ -318,4 +316,86 @@ __global__ void reduction( float *d_SV, float *d_TV, float *d_koef, int nSV, int
 				if(blockSize >= 2)	{reduct[tid] += reduct[tid + 1];}	}
 	if(tid==0){	result[blockIdx.x]=reduct[0];}
 
+}
+
+__global__ void Update1(float *d_k, int *d_y, float *d_f, float *d_a, float *d_delta_a,
+						unsigned int *d_I_global, unsigned int *d_I_cache, 
+						float* d_param, int *d_active, int ntraining)
+{
+	unsigned int i = threadIdx.x;//task number
+	if (d_active[i] == 1)
+	{
+		int g_Iup = d_I_global[2*i];
+		int g_Ilow = d_I_global[2*i+1];
+		float alpha_up_old =d_a[i*ntraining+g_Iup];
+		float alpha_low_old =d_a[i*ntraining+g_Ilow];
+		float gamma;
+		float eps = 0.000001;
+	int s = d_y[g_Iup]*d_y[g_Ilow];
+	float C = d_param[2*i];
+	float L;
+	float H;
+	if (d_y[g_Iup] == d_y[g_Ilow])
+		gamma = alpha_low_old + alpha_up_old;
+	else
+		gamma = alpha_low_old - alpha_up_old;
+	
+
+	if (s == 1)
+	{
+		L = max(0, gamma - C);
+		H = min(C, gamma);
+	}
+	else
+	{
+		L = max(0, -gamma);
+		H = min(C, C - gamma);
+	}
+	if (H <= L)
+		d_active[i] = 0;
+
+	float nu = 2*exp(-d_param[2*i+1]*d_k[d_I_cache[2*i+1]*ntraining+g_Iup]) - 2;
+	float alpha_up_new;
+	float alpha_low_new;
+	if (nu < 0)
+	{
+		alpha_up_new = max(L, min(alpha_up_old - (d_y[g_Iup]*(d_f[i*ntraining+g_Ilow]-d_f[i*ntraining+g_Iup])/nu), H));
+	}
+	else
+	{
+		float slope= d_y[g_Iup]*(d_f[i*ntraining+g_Ilow]-d_f[i*ntraining+g_Iup]);
+		float change= slope * (H-L);
+		if(fabs(change)>0.0f)
+		{
+			if(slope>0.0f)
+				alpha_up_new= H;
+			else
+				alpha_up_new= L;
+		}
+		else
+			alpha_up_new= alpha_up_old;
+
+		if( alpha_up_new > C - eps * C)
+			alpha_up_new=C;
+		else if (alpha_up_new < eps * C)
+				alpha_up_new=0.0f;
+	}
+	if( fabs( alpha_up_new - alpha_up_old) < eps * ( alpha_up_new + alpha_up_old + eps))
+		d_active[i] = 0;
+	if (s == 1)
+		alpha_low_new = gamma - alpha_up_new;
+	else
+		alpha_low_new = gamma + alpha_up_new;
+
+	if( alpha_low_new > C - eps * C)
+		alpha_low_new=C;
+	else if (alpha_low_new < eps * C)
+			alpha_low_new=0.0f;
+
+	d_delta_a[2*i] = alpha_up_new - alpha_up_old;
+	d_delta_a[2*i+1] = alpha_low_new - alpha_low_old;
+	d_a[i*ntraining+g_Iup] = alpha_up_new;
+	d_a[i*ntraining+g_Ilow] = alpha_low_new;
+
+	}
 }

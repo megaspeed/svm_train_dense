@@ -4,8 +4,8 @@
 #include "svm_data.h"
 #include <list>
 #include <algorithm>
-#include <tuple>
 int cache_hit = 0;
+int cache_miss = 0;
 float *converg_time;
 #ifdef _WIN32
 
@@ -67,19 +67,104 @@ float cuGetTimer() { // result in miliSec
 */
 void set_labels(svm_sample *train, svm_model *model)
 {
-	int buf = model->label_set[0];
-	if (buf < model->label_set[1])
+	model->nr_class = 2;
+	model->label_set = (int*)malloc(2*sizeof(int));
+	model->SVperclass = (int*)malloc(2*sizeof(int));
+	model->SVperclass[0] = 0;
+	model->label_set[0] = 1;
+	model->label_set[1] = -1;
+	int buf = train->l_TV[0];
+	for (int i = 1; i < train->nTV; i++)
 	{
-		model->label_set[0] = model->label_set[1];
-		model->label_set[1] = buf;
+		if (buf < train->l_TV[i])
+		{
+			model->label_set[0] = train->l_TV[i];
+			model->label_set[1] = buf;
+			break;
+		}
+		if (buf > train->l_TV[i])
+		{
+			model->label_set[0] = buf;
+			model->label_set[1] = train->l_TV[i];
+			break;
+		}
+		++i;
 	}
+
 	for (int i = 0; i < train->nTV; i++)
 	{
 		if (train->l_TV[i] == model->label_set[0])
-			train->l_TV[i] = 1;
+			{
+				train->l_TV[i] = 1;
+				++model->SVperclass[0];
+			}
 		else
 			train->l_TV[i] = -1;
 	}
+	model->SVperclass[1] = train->nTV - model->SVperclass[0];
+}
+//Swap i,j label and vector
+void swap_l_v(int *l, float *v, int width, int i, int j)
+{
+	int buf = l[i];
+	l[i] = l[j];
+	l[j] = buf;
+	float bufv;
+	for (int ii = 0; ii < width; ii++)
+	{
+		bufv = v[i*width+ii];
+		v[i*width+ii] = v[j*width+ii];
+		v[j*width+ii] = bufv;
+	}
+}
+void sort_by_class(svm_sample *train, int nfeatures)
+{
+	int n = train->nTV;
+	int nclasses = 2;
+	int *l = train->l_TV;
+	float *v = train->TV;
+
+	int i = 0;
+	int j = n-1;
+	for (; i < j; i++, j--)
+	{
+		if (l[i] == 1)
+		{
+			if (l[i] == l[j])
+			{
+				while (l[++i] == 1 && i != j){}
+				if(j == i)
+					break;
+				swap_l_v(l, v, nfeatures, i, j);
+			}
+		}
+		else
+		{
+			if (l[i] != l[j])
+			{
+				swap_l_v(l, v, nfeatures, i, j);
+			}
+			else
+			{
+				while (l[--j] != 1 && i != j){}
+				if(j == i)
+					break;
+				swap_l_v(l, v, nfeatures, i, j);
+			}
+		}
+	}
+}
+
+void set_train(svm_sample *train, svm_sample *test, svm_sample *folds, int ifold, int nfolds, int nfeatures)
+{
+	int partsize = folds->nTV/nfolds;
+	int shift = (nfolds-1)*partsize;
+	train->nTV = shift;
+	test->nTV = partsize;
+	train->l_TV = &folds->l_TV[partsize*ifold];
+	test->l_TV = &folds->l_TV[partsize*ifold+shift];
+	train->TV = &folds->TV[partsize*ifold*nfeatures];
+	test->TV = &folds->TV[(partsize*ifold+shift)*nfeatures];
 }
 
 static char* readline(FILE *input, char* line, int *max_line_len)
@@ -193,14 +278,6 @@ int parse_TV(FILE* inputFilePointer, svm_sample *train, svm_model *model)
 	line = (char*)malloc(max_line_len * sizeof(char));
 	while(readline(inputFilePointer, line, &max_line_len)!=NULL)
 	{
-		char *p = strtok(line," \t"); // label
-		// features
-		while(1)
-		{
-			p = strtok(NULL," \t");
-			if(p == NULL || *p == '\n') // check '\n' as ' ' may be after the last feature
-				break;
-		}
 		++nsamples;
 	}
 	rewind(inputFilePointer);
@@ -351,13 +428,7 @@ int read_model(const char* model_file_name, svm_model *model, int nfeatures)
 		else if(strcmp(cmd,"total_sv")==0)
 			fscanf(fp,"%d",&model->nSV);
 		else if(strcmp(cmd,"rho")==0)
-		{
-			//int n = model->nr_class * (model->nr_class-1)/2;
-			//model->b = (float*)malloc(n*sizeof(float));
-			//for(int i=0;i<n;i++)
-			//	fscanf(fp,"%f",&model->b[i]);
 			fscanf(fp,"%f",&model->b);
-		}
 		else if(strcmp(cmd,"label")==0)
 		{
 			int n = model->nr_class;
@@ -368,9 +439,9 @@ int read_model(const char* model_file_name, svm_model *model, int nfeatures)
 		else if(strcmp(cmd,"nr_sv")==0)
 		{
 			int n = model->nr_class;
-			int temp;
+			model->SVperclass = (int*)malloc(n*sizeof(int));
 			for(int i=0;i<n;i++)
-				fscanf(fp,"%d",&temp);
+				fscanf(fp,"%d",&model->SVperclass[i]);
 		}
 		else if(strcmp(cmd,"SV")==0)
 		{
@@ -417,14 +488,7 @@ int save_model(FILE *fp, const svm_model *model)
 	int l = model->nSV;
 	fprintf(fp, "nr_class %d\n", nr_class);
 	fprintf(fp, "total_sv %d\n",l);
-	
-	{
-		fprintf(fp, "rho");
-		//for(int i=0;i<nr_class*(nr_class-1)/2;i++)
-		//	fprintf(fp," %f",model->b[i]);		
-		fprintf(fp," %f",model->b);
-		fprintf(fp, "\n");
-	}
+	fprintf(fp,"rho %f\n",model->b);
 	
 	if(model->label_set)
 	{
@@ -434,6 +498,13 @@ int save_model(FILE *fp, const svm_model *model)
 		fprintf(fp, "\n");
 	}
 
+	if(model->SVperclass)
+	{
+		fprintf(fp, "nr_sv");
+		for(int i=0;i<nr_class;i++)
+			fprintf(fp," %d",model->SVperclass[i]);
+		fprintf(fp, "\n");
+	}
 
 	fprintf(fp, "SV\n");
 	float *sv_coef = model->l_SV;
@@ -459,34 +530,6 @@ int save_model(FILE *fp, const svm_model *model)
 /**
 * Manage cache 
 */
-bool check_cache1(unsigned int irow, unsigned int *cached_row, float param, std::list<std::pair<float,std::pair<unsigned int,unsigned int> > > *cache, int cache_size)
-{
-	unsigned int pos = 0;
-	std::list<std::pair<float,std::pair<unsigned int,unsigned int> > >::iterator findIter;
-	for (findIter = cache->begin(); findIter != cache->end(); ++findIter, ++pos)
-	{
-		if (irow == findIter->second.first && param == findIter->first)
-		{
-			*cached_row = findIter->second.second;
-			cache->remove(*findIter);
-			cache->push_front(std::make_pair(param, std::make_pair(irow, *cached_row)));
-			cache_hit++;
-			return false;
-		}
-	}
-
-	if (cache->size() == cache_size)
-	{
-		*cached_row = (--findIter)->second.second;
-		cache->pop_back();
-	}
-	else
-	{
-		*cached_row = pos;
-	}
-	cache->push_front(std::make_pair(param, std::make_pair(irow, *cached_row)));
-	return true;
-}
 bool check_cache(unsigned int irow, unsigned int *cached_row, std::list<std::pair<unsigned int,unsigned int>> *cache, int cache_size)
 {
 	unsigned int pos = 0;
@@ -498,7 +541,7 @@ bool check_cache(unsigned int irow, unsigned int *cached_row, std::list<std::pai
 			*cached_row = findIter->second;
 			cache->remove(*findIter);
 			cache->push_front(std::make_pair(irow, *cached_row));
-			cache_hit++;
+			++cache_hit;
 			return false;
 		}
 	}
@@ -512,6 +555,7 @@ bool check_cache(unsigned int irow, unsigned int *cached_row, std::list<std::pai
 	{
 		*cached_row = pos;
 	}
+	++cache_miss;
 	cache->push_front(std::make_pair(irow, *cached_row));
 	return true;	
 }
@@ -526,10 +570,10 @@ bool chech_condition(float* B, int *active_task, int ntasks, int iter)
 		if (B[2*i+1] <= B[2*i] + 2*TAU)
 		{
 			active_task[i] = 0;
-			if(!converg_time[i]){
-				converg_time[i]=cuGetTimer();
-				printf("Task %d has convergent in %f on iter=%d\n", i, converg_time[i], iter);
-			}
+			//if(!converg_time[i]){
+			//	converg_time[i]=cuGetTimer();
+			//	printf("Task %d has convergent in %f on iter=%d\n", i, converg_time[i], iter);
+			//}
 		}
 		run = run||active_task[i];
 	}
@@ -542,7 +586,7 @@ bool chech_condition(float* B, int *active_task, int ntasks, int iter)
 * @param c_col total # of C(i) where C(i)=C(i-1)/2
 * @param gbegin first value of parameter gamma in RBF kernel
 * @param g_col total # of gamma(i) where gamma(i)=gamma(i-1)/2
-* gamma[0] always equal 1/nfeatureas
+* gamma[0] is always equal 1/nfeatures
 */
 void set_model_param(svm_model *model, float cbegin, int c_col, float gbegin, int g_col)
 {
@@ -580,7 +624,7 @@ void set_model_param(svm_model *model, float cbegin, int c_col, float gbegin, in
 /**
 * Divide train data into train and test subsets in a ratio percent
 */
-void balabce_data(svm_sample *train, svm_sample *test, float percent)
+void balance_data(svm_sample *train, svm_sample *test, float percent)
 {
 	int train_part = (int)(train->nTV*percent);
 	test->nTV = train->nTV - train_part;

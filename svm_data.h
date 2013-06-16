@@ -24,6 +24,7 @@ struct svm_model
 	float *l_SV;		/*	SV's labels				*/
 	float b;			/*	classification parametr	*/	
 	int *label_set;		/*  intput lables			*/
+	int *SVperclass;	/* number of SVs for each class*/
 	int svm_type;
 	int kernel_type;
 	float coef_d;

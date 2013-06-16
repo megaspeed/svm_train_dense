@@ -92,6 +92,7 @@ void classifier(svm_model *model, svm_sample *test, float *rate)
 	
 	free(h_l_estimated);
 	free(h_fdata);
+	printf("# of testing samples %i, # errors %i, Rate %f\n", nTV, errors, 100* (float)(nTV-errors)/nTV);
 }
 void Reduce_step(int *d_y, float *d_a, float *d_f, float *d_B, unsigned int *d_I, float *param, int ntraining, int nblocks,
 				 float *h_B, unsigned int *h_I, float* h_B_global, unsigned int *h_I_global, int *active, int ntasks)
@@ -211,43 +212,49 @@ void cross_validation(svm_sample *train, svm_model *model)
 	unsigned int remainingMemory;
 	unsigned int totalMemory;
 	cudaMemGetInfo(&remainingMemory, &totalMemory);
-	printf("%u bytes of memory found on device, %u bytes currently free\n", totalMemory, remainingMemory);
+	//printf("%u bytes of memory found on device, %u bytes currently free\n", totalMemory, remainingMemory);
 	int sizeOfCache = remainingMemory/(nTV*sizeof(float));
-	sizeOfCache = (int)((float)sizeOfCache*KMEM);
 	if (nTV < sizeOfCache)
 		sizeOfCache = nTV;
+	sizeOfCache = max((int)((float)sizeOfCache*KMEM/16),2*ntasks);
 	printf("%u rows of kernel matrix will be cached (%u bytes per row)\n", sizeOfCache, nTV*sizeof(float));
-
 	float *d_k = 0;// gramm matrix
 	cudaMalloc((void**) &d_k, sizeOfCache*nTV*sizeof(float));
 
 	int iter = 0;
 	std::list<std::pair<unsigned int,unsigned int> > cache;
-	
+	float ctime = 0;
+	float cc ;
 	while (chech_condition(h_B_global, h_active, ntasks, iter))
 	{
 		++iter;	
+		cc = cuGetTimer();
 		for (int itask = 0; itask < ntasks; itask++)
 		{
 			if (h_active[itask] == 1)
 			{
 				if(check_cache(h_I_global[2*itask], &h_I_cache[2*itask], &cache, sizeOfCache))		//Iup - second
+				{
 					get_row<<<nblocks, nthreads>>>(d_k, d_TV, nfeatures, h_I_global[2*itask], h_I_cache[2*itask], nTV);
+				}
 				if(check_cache(h_I_global[2*itask+1], &h_I_cache[2*itask+1], &cache, sizeOfCache))//Ilow - fist
+				{
 					get_row<<<nblocks, nthreads>>>(d_k, d_TV, nfeatures, h_I_global[2*itask+1], h_I_cache[2*itask+1], nTV);
+				}
 			}
 		}
+		ctime +=cuGetTimer() - cc;
 		cudaMemcpy(d_active, h_active, ntasks*sizeof(int),cudaMemcpyHostToDevice);
 		cudaMemcpy(d_I_cache, h_I_cache, ntasks*2*sizeof(unsigned int),cudaMemcpyHostToDevice);
 		cudaMemcpy(d_I_global, h_I_global, ntasks*2*sizeof(unsigned int),cudaMemcpyHostToDevice);
 
-		Update<<<1,ntasks>>>(d_k, d_y, d_f, d_a, d_delta_a, d_I_global, d_I_cache, d_params, d_active, nTV);
+		Update1<<<1,ntasks>>>(d_k, d_y, d_f, d_a, d_delta_a, d_I_global, d_I_cache, d_params, d_active, nTV);
 		cudaDeviceSynchronize();
 		Map<<<dim3(nblocks, task_blocks), dim3(nthreads, task_threads)>>>(d_f, d_k, d_y, d_delta_a, d_I_global, d_I_cache, d_params, d_active, nTV);
 		cudaDeviceSynchronize();
 		Reduce_step(d_y, d_a, d_f, d_B, d_I, d_params, nTV, nblocks, h_B, h_I, h_B_global, h_I_global, h_active, ntasks);
 	}
-	printf("All tasks convergented in %f\n", cuGetTimer());
+	printf("All tasks convergented in %f on %d iter cctime = %f\n", cuGetTimer(), iter, ctime);
 
 	model->l_SV = (float*)malloc(nTV*ntasks*sizeof(float));
 	cudaMemcpy(model->l_SV, d_a, nTV*ntasks*sizeof(float), cudaMemcpyDeviceToHost);
@@ -265,9 +272,9 @@ void classification( svm_sample *train, svm_sample *test, svm_model *model, FILE
 	int ntraining = train->nTV;
 	float *buf_l = model->l_SV;
 	float rate;
-	float max_rate = 0;
+	float min_C = 0;
+	float max_rate= 0;
 	int max_rate_ind;
-
 	for (int itask = 0; itask < model->ntasks; itask++)
 	{
 		float *SV = (float*)malloc(ntraining*model->nfeatures*sizeof(float));
@@ -289,6 +296,7 @@ void classification( svm_sample *train, svm_sample *test, svm_model *model, FILE
 			printf("Task %d has bad parameters C=%f and gamma=%f #SV=%d\n",itask, model->params[2*itask], model->params[2*itask+1], nSV);
 			continue;
 		}
+
 		model->nSV = nSV;
 		model->b = model->mass_b[itask];
 		model->C = model->params[2*itask];
@@ -296,11 +304,12 @@ void classification( svm_sample *train, svm_sample *test, svm_model *model, FILE
 		model->l_SV=(float*)realloc(l_sv, nSV*sizeof(float));
 		model->SV_dens=(float*)realloc(SV, nSV*model->nfeatures*sizeof(float));
 		classifier(model, test, &rate);
-		//save_model(output, model);
-		if (max_rate < rate)
+		save_model(output, model);
+		if ((max_rate <= rate) && (min_C < model->params[2*itask]))
 		{
 			max_rate = rate;
 			max_rate_ind = itask;
+			min_C = model->params[2*itask];
 		}
 		free(model->l_SV);
 		free(model->SV_dens);
@@ -308,42 +317,82 @@ void classification( svm_sample *train, svm_sample *test, svm_model *model, FILE
 	}
 	printf("best occuracy is %f with C=%f and gamma=%f\n", max_rate, model->params[2*max_rate_ind], model->params[2*max_rate_ind+1]);
 
-	//free(model->label_set);
-	//free(model->mass_b);
+	free(model->mass_b);
 	//free(model->params);
 	//free(model);
 	//free(test->l_TV);
 	//free(test->TV);
 	//free(test);
 }
-
+void set_folds(svm_sample *train, svm_sample *test, int nfolds, int nfeatures)
+{
+	svm_sample *folds = (svm_sample*)malloc(sizeof(svm_sample));
+	int n = train->nTV;
+	int m = n/nfolds;
+	int total_elem = nfolds*m;
+	folds->l_TV = (int*)malloc(total_elem*sizeof(int));
+	folds->TV = (float*)malloc(total_elem*nfeatures*sizeof(float));
+	int shift = m*nfeatures;
+	for (int i = 0; i < m; i++)
+	{
+		for (int ifold = 0; ifold < nfolds; ifold++)
+		{
+			folds->l_TV[ifold*m+i] = train->l_TV[i*nfolds+ifold];
+			for (int k = 0; k < nfeatures; k++)
+			{
+				folds->TV[ifold*shift+i*nfeatures+k] = train->TV[(i*nfolds+ifold)*nfeatures+k];
+			}
+		}
+	}
+	free(train->TV);
+	free(train->l_TV);
+	train->nTV = (nfolds-1)*m;
+	test->nTV = m;
+	train->TV = folds->TV;
+	train->l_TV = folds->l_TV;
+	test->TV = &folds->TV[train->nTV*nfeatures];
+	test->l_TV = &folds->l_TV[train->nTV];
+}
 int main(int argc, char **argv)
 {
 	FILE *input_train, *input_test, *output;
 	if (argc==1)
 	{
 		argc = 5;
-		//argv[1] = "C:\\Data\\b.txt";
-		//argv[2] = "C:\\Data\\b.model";
-		//argv[3] = "C:\\Data\\b.txt";
-		//argv[4] = "10";
-		argv[1] = "C:\\Data\\a9a";
-		argv[2] = "C:\\Data\\a9a.model";
-		argv[3] = "C:\\Data\\a9a.t";
-		argv[4] = "123";
+		argv[1] = "C:\\Data\\b.txt";
+		argv[2] = "C:\\Data\\b.model";
+		argv[3] = "C:\\Data\\b.txt";
+		argv[4] = "10";
+		//argv[1] = "C:\\Data\\a9a";
+		//argv[2] = "C:\\Data\\a9a.model";
+		//argv[3] = "C:\\Data\\a9a.t";
+		//argv[4] = "123";
 		//argv[1] = "C:\\Data\\mushrooms";
 		//argv[2] = "C:\\Data\\mushrooms.model";
-		//argv[3] = "112";
+		//argv[3] = "C:\\Data\\mushrooms.t";
+		//argv[4] = "112";
 		//argv[1] = "C:\\Data\\ijcnn1";
 		//argv[2] = "C:\\Data\\ijcnn1.model";
-		//argv[3] = "22";
-
+		//argv[3] = "C:\\Data\\ijcnn1.t";
+		//argv[4] = "22";
+		//argv[1] = "C:\\Data\\w8a";
+		//argv[2] = "C:\\Data\\w8a.model";
+		//argv[3] = "C:\\Data\\w8a.t";
+		//argv[4] = "300";
+		argv[1] = "C:\\Data\\cod-rna";
+		argv[2] = "C:\\Data\\cod.model";
+		argv[3] = "C:\\Data\\cod-rna.t";
+		argv[4] = "8";
+		//argv[1] = "C:\\Data\\cov";
+		//argv[2] = "C:\\Data\\cov.model";
+		//argv[3] = "C:\\Data\\cov.t";
+		//argv[4] = "54";
 	}
 	if(argc<5)
 		exit_with_help();
-	struct svm_model *model = (svm_model*)malloc(sizeof(svm_model));
-	struct svm_sample *train = (svm_sample*)malloc(sizeof(svm_sample));
-	struct svm_sample *test = (svm_sample*)malloc(sizeof(svm_sample));
+	svm_model *model = (svm_model*)malloc(sizeof(svm_model));
+	svm_sample *train = (svm_sample*)malloc(sizeof(svm_sample));
+	svm_sample *test = (svm_sample*)malloc(sizeof(svm_sample));
 	sscanf(argv[4],"%d",&model->nfeatures);
 
 	if((input_train = fopen(argv[1],"r")) == NULL)
@@ -362,9 +411,7 @@ int main(int argc, char **argv)
 		fprintf(stderr,"can't open input file %s\n",argv[1]);
 		exit(1);
 	}
-
-	float percent = 0.8;
-	set_model_param(model, 1, 8, 0.04, 4);
+	set_model_param(model, 1, 1, 0.03125, 1);
 	converg_time= (float*)malloc(model->ntasks*sizeof(float));
 	for (int itask = 0; itask < model->ntasks; itask++)
 		converg_time[itask] = 0;
@@ -372,11 +419,17 @@ int main(int argc, char **argv)
 	parse_TV(input_train, train, model);
 	set_labels(test, model);
 	set_labels(train, model);
-	//balabce_data(train, test, percent);
+	//sort_by_class(train, model->nfeatures);
+	
+	//int nfolds = 5;
+	//set_folds(train, test, nfolds, model->nfeatures);
+
 	cuResetTimer();
 	cross_validation(train, model);
+	printf("Train time %f\n", cuGetTimer());
 	classification(train, test, model, output);
-	printf("Total time %f cache hits %d\n", cuGetTimer(), cache_hit);
+	printf("Cache: hits %d miss %d percent of hits %f\n", cache_hit, cache_miss, (float)cache_hit/cache_miss*100);
+	printf("Total time %f\n", cuGetTimer());
 	cudaDeviceReset();
 	return 0;
 }
