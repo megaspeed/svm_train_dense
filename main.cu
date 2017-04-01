@@ -1,8 +1,5 @@
 #include "common.cpp"
-#include <cuda_runtime_api.h>
-#include <cublas_v2.h>
 #include <float.h>
-#include "device_launch_parameters.h"
 #include "kernels.cu"
 #include <list>
 #include <algorithm>
@@ -194,8 +191,8 @@ void train_model(svm_sample *train, svm_model *model)
 	Reduce_step(d_y, d_a, d_f, d_B, d_I, C, nTV, nblocks, h_B, h_I, h_B_global, h_I_global);
 	void* temp;
 	size_t rowPitch;
-	unsigned int remainingMemory;
-	unsigned int totalMemory;
+	size_t remainingMemory;
+	size_t totalMemory;
 	cudaMallocPitch(&temp, &rowPitch, nTV*sizeof(float), 1);
 	cudaFree(temp);
 
